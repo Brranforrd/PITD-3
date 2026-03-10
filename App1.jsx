@@ -12,6 +12,7 @@ import "./App.css";
 
 const API_BASE = "http://localhost:8000/api";
 
+// GALLERY EXAMPLES
 const ATTACK_EXAMPLES = [
   {
     label: "Direct Injection",
@@ -182,8 +183,8 @@ export default function App() {
 
   // Ollama health state
   const [ollamaStatus, setOllamaStatus] = useState({
-    reachable: null,        // null = not yet checked
-    model: "llama3.2",      // matches OLLAMA_MODEL default in .env
+    reachable: null,   // null = not yet checked
+    model: "—",
     modelAvailable: null,
   });
 
@@ -198,12 +199,12 @@ export default function App() {
           const data = await res.json();
           setOllamaStatus({
             reachable: data.ollama_reachable,
-            model: data.model ?? "llama3.2",
+            model: data.model ?? "—",
             modelAvailable: data.model_available,
           });
         }
       } catch {
-        setOllamaStatus(prev => ({ ...prev, reachable: false, modelAvailable: false }));
+        setOllamaStatus({ reachable: false, model: "—", modelAvailable: false });
       }
     };
     checkHealth();
