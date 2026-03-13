@@ -423,6 +423,14 @@ export default function App() {
                 </>
               )}
 
+              {/* AI Response from Ollama */}
+              {result?.ai_response && (
+                <div className="sanitized-card" style={{ borderColor: 'rgba(0,255,136,0.3)', background: 'rgba(0,255,136,0.05)' }}>
+                  <p className="sanitized-label" style={{ color: 'var(--green)' }}>// OLLAMA RESPONSE</p>
+                  <p className="sanitized-text" style={{ whiteSpace: 'pre-wrap' }}>{result.ai_response}</p>
+                </div>
+              )}
+
               {/* Error */}
               {result?.error && (
                 <div className="error-card">{result.message}</div>

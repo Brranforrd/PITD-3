@@ -5,23 +5,43 @@ Exposes:
   POST /api/analyze-prompt  — multi-layer injection analysis
   GET  /api/health          — liveness check + Ollama status
   GET  /api/models          — list models available in Ollama
+
+Detection pipeline
+------------------
+  Stage 1 — llm_guard pre-scan (PromptInjection, Secrets, InvisibleText, Language)
+             Sanitises the prompt and provides a pre-signal risk boost.
+
+  Stage 2 — Four custom layers (parallel, purely local, no downloads):
+             layers/mlc.py  ML Classifier       (Iron Man   🦾)
+             layers/rb.py   Rule-Based          (Cap. America🛡)
+             layers/sa.py   Similarity Analysis (Black Widow 🕷)
+             layers/fe.py   Feature Engineering (Dr. Strange 🔮)
+
+  Stage 3 — Nick Fury Orchestrator: weighted aggregation → verdict → action.
+
+  Stage 4 — Forward safe/sanitised prompts to Ollama for inference.
 """
 
 import os
-import json
+import re
 import time
 import httpx
 
-from fastapi import  FastAPI, APIRouter, HTTPException, Request
+from fastapi import FastAPI, APIRouter, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-import time
-import requests
 
+# ── Custom detection layers ───────────────────────────────────────────────
+from Layers.mlc import ml_classifier_layer
+from Layers.rb  import rule_based_layer
+from Layers.sa  import similarity_analysis_layer
+from Layers.fe  import feature_engineering_layer
+
+# ── llm_guard ─────────────────────────────────────────────────────────────
 from llm_guard import scan_prompt
 from llm_guard.input_scanners import (
     PromptInjection,
@@ -32,66 +52,51 @@ from llm_guard.input_scanners import (
 from llm_guard.input_scanners.language import MatchType
 
 
-# ── Rate Limiter ───────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# RATE LIMITER
+# ════════════════════════════════════════════════════════════════════════════
 
 limiter = Limiter(key_func=get_remote_address)
-router = APIRouter()
+router  = APIRouter()
 
 
-
-
-# ── Ollama Config ──────────────────────────────────────────────────────────
-# Override via .env:
+# ════════════════════════════════════════════════════════════════════════════
+# OLLAMA CONFIG
+# Override via environment variables:
 #   OLLAMA_BASE_URL=http://localhost:11434
 #   OLLAMA_MODEL=llama3.2
+# ════════════════════════════════════════════════════════════════════════════
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_CHAT_URL = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_TAGS_URL = f"{OLLAMA_BASE_URL}/api/tags"
-MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+MODEL           = os.getenv("OLLAMA_MODEL", "llama3.2")
 
 
-# ── System Prompt ──────────────────────────────────────────────────────────
-# "format: json" in the Ollama payload constrains the model to valid JSON,
-# but a strong system prompt is still needed to shape the schema correctly.
+# ════════════════════════════════════════════════════════════════════════════
+# LLM_GUARD SCANNER INITIALISATION
+# Scanners are constructed once at module load to avoid per-request overhead.
+# ════════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = ''' You are GuardianLM, an expert security system that analyzes prompts for injection attacks.
-Analyze the given prompt and respond ONLY with a valid JSON object.
-Do NOT include markdown fences, backticks, or any text outside the JSON object.
+_LG_SCANNERS = [
+    PromptInjection(),
+    Secrets(),
+    InvisibleText(),
+    Language(valid_languages=["en"], match_type=MatchType.FULL),
+]
 
-Required JSON schema (fill every field):
-{
-  "overall_risk_score": <integer 0-100>,
-  "verdict": "<one of: SAFE | SUSPICIOUS | HIGH_RISK | CRITICAL>",
-  "attack_types_detected": ["<attack type string>"],
-  "layers": {
-    "ml_classifier": {
-      "score": <integer 0-100>,
-      "triggered": <true | false>,
-      "reason": "<one sentence explanation>"
-    },
-    "rule_based": {
-      "score": <integer 0-100>,
-      "triggered": <true | false>,
-      "reason": "<one sentence, mention specific patterns if found>"
-    },
-    "similarity_analysis": {
-      "score": <integer 0-100>,
-      "triggered": <true | false>,
-      "reason": "<one sentence explanation>"
-    },
-    "feature_engineering": {
-      "score": <integer 0-100>,
-      "triggered": <true | false>,
-      "reason": "<one sentence, mention entropy/char ratios/length if relevant>"
-    }
-  },
-  "recommended_action": "<one of: ALLOW | SANITIZE | BLOCK | ESCALATE>",
-  "sanitized_prompt": "<cleaned prompt string if action is SANITIZE, otherwise null>"
-} '''
+# llm_guard scanner class-name → friendly attack-type label used in response
+_LG_ATTACK_TYPE_MAP: dict[str, str] = {
+    "PromptInjection": "llm_guard:PromptInjection",
+    "Secrets":         "llm_guard:Secrets",
+    "InvisibleText":   "llm_guard:InvisibleText",
+    "Language":        "llm_guard:Language",
+}
 
 
-# ── Pydantic Schemas ───────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# PYDANTIC SCHEMAS
+# ════════════════════════════════════════════════════════════════════════════
 
 class PromptRequest(BaseModel):
     prompt: str
@@ -107,118 +112,214 @@ class PromptRequest(BaseModel):
 
 
 class LayerResult(BaseModel):
-    score: int
+    score:     int
     triggered: bool
-    reason: str
+    reason:    str
 
 
 class AnalysisResponse(BaseModel):
-    overall_risk_score: int
-    verdict: str
+    overall_risk_score:    float
+    verdict:               str
     attack_types_detected: list[str]
-    layers: dict[str, LayerResult]
-    recommended_action: str
-    sanitized_prompt: str | None
-    latency_ms: float
+    layers:                dict[str, LayerResult]
+    recommended_action:    str
+    sanitized_prompt:      str | None
+    latency_ms:            float
+    ai_response:           str | None
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ════════════════════════════════════════════════════════════════════════════
 
 def _strip_fences(text: str) -> str:
-    """Remove any accidental markdown code fences a model might emit."""
+    """Remove accidental markdown code fences some models emit."""
     text = text.strip()
     if text.startswith("```"):
-        text = text.split("\n", 1)[-1]  # drop the opening ``` line
+        text = text.split("\n", 1)[-1]
     if text.endswith("```"):
         text = text.rsplit("```", 1)[0]
     return text.strip()
 
 
-# ── Scanners ───────────────────────────────────────────────────────────────
+def _naive_sanitize(prompt: str) -> str:
+    """
+    Lightweight fallback sanitiser for SANITIZE-grade prompts.
+    Strips the most common override and smuggling patterns.
+    llm_guard's scan_prompt() already sanitises at the text level;
+    this adds a second pass for any residual patterns.
+    """
+    out = re.sub(
+        r"\bignore\b.{0,60}\b(instructions?|rules?|guidelines?)\b",
+        "[REDACTED]",
+        prompt,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    out = re.sub(
+        r"\[.{0,80}(system|override|ignore|admin|instructions?).{0,80}\]",
+        "[REDACTED]",
+        out,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return out.strip()
 
-scanners = [
-    PromptInjection(),
-    Secrets(),
-    InvisibleText(),
-    Language(valid_languages=["en"], match_type=MatchType.FULL),
-]
+
+# ════════════════════════════════════════════════════════════════════════════
+# ORCHESTRATOR  (Nick Fury 🎖️)
+# ════════════════════════════════════════════════════════════════════════════
+
+# Weights must sum to 1.0
+_LAYER_WEIGHTS: dict[str, float] = {
+    "ml_classifier":       0.30,
+    "rule_based":          0.35,
+    "similarity_analysis": 0.20,
+    "feature_engineering": 0.15,
+}
+
+# llm_guard risk boost applied to the weighted custom-layer score.
+# Max boost is 20 points — llm_guard informs but doesn't dominate.
+_LG_BOOST_WEIGHT = 0.20
 
 
-# ── Routes ─────────────────────────────────────────────────────────────────
+def _run_llm_guard(prompt: str) -> tuple[str, list[str], float]:
+    """
+    Runs llm_guard scanners.
 
-@router.post("/analyze-prompt")
+    Returns
+    -------
+    sanitized     : str   — text after llm_guard sanitisation (may equal prompt)
+    lg_attacks    : list  — friendly labels for each triggered scanner
+    lg_boost      : float — risk boost (0–20) based on PromptInjection score
+
+    Note: scan_prompt scores are "validity" scores (1.0 = fully safe).
+    PromptInjection risk = (1 - validity_score).
+    """
+    try:
+        sanitized, valid, scores = scan_prompt(_LG_SCANNERS, prompt)
+    except Exception:
+        # If llm_guard fails (e.g. model download pending), degrade gracefully
+        return prompt, [], 0.0
+
+    lg_attacks: list[str] = []
+    for scanner_name, is_valid in valid.items():
+        if not is_valid:
+            label = _LG_ATTACK_TYPE_MAP.get(scanner_name, f"llm_guard:{scanner_name}")
+            lg_attacks.append(label)
+
+    # PromptInjection validity score: 1.0 = safe, lower = riskier
+    pi_validity  = scores.get("PromptInjection", 1.0)
+    pi_risk      = max(0.0, 1.0 - float(pi_validity))   # 0.0 → 1.0
+    lg_boost     = round(pi_risk * 20, 2)                # scale to 0–20 points
+
+    return str(sanitized), lg_attacks, lg_boost
+
+
+def _run_custom_layers(prompt: str) -> tuple[dict, float, list[str]]:
+    """
+    Runs all four custom detection layers and returns their results.
+
+    Returns
+    -------
+    layers       : dict  — layer_key → raw result dict
+    base_score   : float — weighted average of layer scores (0–100)
+    layer_attacks: list  — keys of triggered layers
+    """
+    layers: dict[str, dict] = {
+        "ml_classifier":       ml_classifier_layer(prompt),
+        "rule_based":          rule_based_layer(prompt),
+        "similarity_analysis": similarity_analysis_layer(prompt),
+        "feature_engineering": feature_engineering_layer(prompt),
+    }
+
+    base_score    = sum(layers[k]["score"] * _LAYER_WEIGHTS[k] for k in layers)
+    layer_attacks = [k for k, v in layers.items() if v["triggered"]]
+
+    return layers, round(base_score, 2), layer_attacks
+
+
+def _verdict_and_action(score: float) -> tuple[str, str]:
+    if score < 30:
+        return "SAFE",      "ALLOW"
+    if score < 60:
+        return "SUSPICIOUS","SANITIZE"
+    if score < 80:
+        return "HIGH_RISK", "BLOCK"
+    return "CRITICAL",      "ESCALATE"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# ROUTES
+# ════════════════════════════════════════════════════════════════════════════
+
+@router.post("/analyze-prompt", response_model=AnalysisResponse)
 @limiter.limit("60/minute")
 async def analyze_prompt(request: Request, body: PromptRequest):
     """
-    Multi-layer prompt injection analysis via llm_guard scanners.
-    Safe/sanitizable prompts are forwarded to Ollama and ai_response is returned.
+    Full multi-layer prompt injection analysis.
+
+    Pipeline
+    --------
+    1. llm_guard pre-scan  → sanitised text + risk boost
+    2. Four custom layers  → per-layer scores + reasons
+    3. Orchestrator        → weighted overall score, verdict, action
+    4. Ollama forward      → AI response (ALLOW / SANITIZE only)
     """
     start = time.time()
 
-    sanitized, valid, scores = scan_prompt(scanners, body.prompt)
+    # ── Stage 1: llm_guard ───────────────────────────────────────────────
+    lg_sanitized, lg_attacks, lg_boost = _run_llm_guard(body.prompt)
 
-    # ── Build layer results ────────────────────────────────────────────────
-    layers = {}
-    attack_types = []
-    risk_total = 0
+    # ── Stage 2: Custom layers (run on original prompt for accurate scoring)
+    layers, base_score, layer_attacks = _run_custom_layers(body.prompt)
 
-    for name, ok in valid.items():
-        risk = scores[name] * 100
-        triggered = not ok
+    # ── Stage 3: Orchestrate ─────────────────────────────────────────────
+    # Combine weighted custom score + llm_guard boost, cap at 100
+    overall_score  = min(100.0, round(base_score + lg_boost, 2))
+    verdict, action = _verdict_and_action(overall_score)
+    attack_types   = list(dict.fromkeys(layer_attacks + lg_attacks))  # dedup, order-preserving
 
-        if triggered:
-            attack_types.append(name)
-
-        layers[name] = {
-            "score": round(risk, 2),
-            "triggered": triggered,
-            "reason": "Threat detected" if triggered else "No anomalies detected",
-        }
-
-        risk_total += risk
-
-    overall_score = min(100, risk_total / max(len(valid), 1))
-
-    # ── Verdict + Action ───────────────────────────────────────────────────
-    if overall_score < 30:
-        verdict = "SAFE"
-        action = "ALLOW"
-    elif overall_score < 60:
-        verdict = "SUSPICIOUS"
-        action = "SANITIZE"
-    elif overall_score < 80:
-        verdict = "HIGH_RISK"
-        action = "BLOCK"
+    # ── Determine sanitised output ────────────────────────────────────────
+    # Use llm_guard's sanitised text as the base; apply naive pass if SANITIZE
+    if action == "SANITIZE":
+        sanitized_text   = _naive_sanitize(lg_sanitized)
+        sanitized_output = sanitized_text if sanitized_text != body.prompt else None
+    elif lg_sanitized != body.prompt:
+        # llm_guard removed something (e.g. invisible characters) even for ALLOW
+        sanitized_output = lg_sanitized
     else:
-        verdict = "CRITICAL"
-        action = "ESCALATE"
+        sanitized_output = None
 
-    # ── Call Ollama (only if prompt is safe enough) ────────────────────────
-    ai_response = None
+    final_prompt = sanitized_output or body.prompt
 
-    if action in ["ALLOW", "SANITIZE"]:
+    # ── Stage 4: Ollama inference ─────────────────────────────────────────
+    ai_response: str | None = None
+
+    if action in ("ALLOW", "SANITIZE"):
         payload = {
-            "model": MODEL,
-            "messages": [{"role": "user", "content": sanitized}],
-            "stream": False,
+            "model":    MODEL,
+            "messages": [{"role": "user", "content": final_prompt}],
+            "stream":   False,
         }
-
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(OLLAMA_CHAT_URL, json=payload)
                 resp.raise_for_status()
                 ai_response = resp.json()["message"]["content"]
+
         except httpx.HTTPStatusError as exc:
             raise HTTPException(
                 status_code=502,
-                detail=f"Ollama returned an error ({exc.response.status_code}): {exc.response.text}",
+                detail=(
+                    f"Ollama returned an error ({exc.response.status_code}): "
+                    f"{exc.response.text}"
+                ),
             )
         except httpx.ConnectError:
             raise HTTPException(
                 status_code=503,
                 detail=(
                     f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
-                    "Make sure Ollama is running (`ollama serve`) and the model is pulled "
+                    "Ensure Ollama is running (`ollama serve`) and the model is pulled "
                     f"(`ollama pull {MODEL}`)."
                 ),
             )
@@ -228,25 +329,24 @@ async def analyze_prompt(request: Request, body: PromptRequest):
     latency_ms = round((time.time() - start) * 1000, 2)
 
     return {
-        "overall_risk_score": round(overall_score, 2),
-        "verdict": verdict,
-        "recommended_action": action,
-        "sanitized_prompt": sanitized if sanitized != body.prompt else None,
+        "overall_risk_score":    overall_score,
+        "verdict":               verdict,
+        "recommended_action":    action,
+        "sanitized_prompt":      sanitized_output,
         "attack_types_detected": attack_types,
-        "layers": layers,
-        "latency_ms": latency_ms,
-        "ai_response": ai_response,
+        "layers":                layers,
+        "latency_ms":            latency_ms,
+        "ai_response":           ai_response,
     }
 
 
 @router.get("/health", tags=["Health"])
 async def health_check():
     """
-    Liveness probe — also checks whether Ollama is reachable and the
-    configured model is available.
+    Liveness probe — checks Ollama reachability and model availability.
     """
     ollama_reachable = False
-    model_available = False
+    model_available  = False
     available_models: list[str] = []
 
     try:
@@ -254,23 +354,22 @@ async def health_check():
             resp = await client.get(OLLAMA_TAGS_URL)
             if resp.status_code == 200:
                 ollama_reachable = True
-                tags = resp.json().get("models", [])
+                tags             = resp.json().get("models", [])
                 available_models = [m["name"] for m in tags]
-                # Ollama stores names like "llama3.2:latest" — check prefix match
-                model_available = any(
+                model_available  = any(
                     m == MODEL or m.startswith(f"{MODEL}:")
                     for m in available_models
                 )
     except Exception:
-        pass  # Ollama not running — surfaced via the flags below
+        pass
 
     return {
-        "status": "ok",
-        "service": "GuardianLM Detection Engine",
-        "ollama_url": OLLAMA_BASE_URL,
+        "status":           "ok",
+        "service":          "GuardianLM Detection Engine",
+        "ollama_url":       OLLAMA_BASE_URL,
         "ollama_reachable": ollama_reachable,
-        "model": MODEL,
-        "model_available": model_available,
+        "model":            MODEL,
+        "model_available":  model_available,
         "available_models": available_models,
     }
 
