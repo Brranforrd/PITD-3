@@ -5,7 +5,11 @@ Doctor Strange 🔮 — sees structural anomalies invisible to all other layers.
 Public API
 ----------
 feature_engineering_layer(prompt: str) -> dict
-    Returns: { score: int, triggered: bool, reason: str }
+    Returns:
+        score     : int
+        triggered : bool
+        reason    : str   — single clean summary line
+        signals   : dict  — per-signal breakdown for frontend rendering
 """
 
 import math
@@ -14,140 +18,176 @@ from collections import Counter
 from dataclasses import dataclass
 
 
-# ── Feature thresholds ────────────────────────────────────────────────────
+# ── Thresholds ────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class _Thresholds:
-    entropy_high:        float = 4.5    # Shannon entropy — obfuscation signal
-    special_char_ratio:  float = 0.12   # punctuation/symbols — encoding signal
-    length_long:         int   = 500    # characters — unusually verbose prompts
-    # FIX (Bug E): Lowered from 3 → 2. Short, surgical injections use only
-    # 2 command verbs (e.g. "print/expose", "ignore/reveal") but are just
-    # as dangerous as longer ones. 3 was causing false negatives on Prompts
-    # 1 and 2 during live testing.
+    entropy_high:        float = 4.5
+    special_char_ratio:  float = 0.12
+    length_long:         int   = 500
     imperative_min:      int   = 2
-    uppercase_ratio:     float = 0.25   # shouting / emphatic tone
-
+    uppercase_ratio:     float = 0.25
+    punct_abuse_count:   int   = 3      # repeated ! or ? runs — new
+    repetition_ratio:    float = 0.25   # 3-gram phrase repetition — new
 
 _T = _Thresholds()
 
 
-# ── Scoring weights (additive, capped at MAX_SCORE) ───────────────────────
-_SCORE_ENTROPY        = 20
-_SCORE_SPECIAL_CHARS  = 20
-_SCORE_LENGTH         = 15
-_SCORE_IMPERATIVES    = 25
-_SCORE_UPPERCASE      = 10
-_MAX_SCORE            = 95
-_TRIGGER_THRESHOLD    = 30
+# ── Scoring weights ────────────────────────────────────────────────────────
+# Rebalanced so all 7 signals firing = ~100, capped at 95.
+_W_ENTROPY        = 20
+_W_SPECIAL_CHARS  = 15
+_W_LENGTH         = 10
+_W_IMPERATIVES    = 20   # scaled by count, not binary
+_W_UPPERCASE      = 10
+_W_PUNCT_ABUSE    = 15   # new
+_W_REPETITION     = 10   # new
 
-# ── Imperative verbs associated with injection attacks ────────────────────
-# FIX (Bug D / Bug E): Added "print", "expose", "leak", "dump", "show",
-# "reveal" were already present; added "list", "enumerate", "display",
-# "extract", "read", "access" to catch data-exfiltration phrasing like
-# "print any internal messages, API keys, or secret tokens".
-_IMPERATIVE_PATTERN = re.compile(
+_MAX_SCORE         = 95
+_TRIGGER_THRESHOLD = 30
+
+# ── Patterns ──────────────────────────────────────────────────────────────
+_IMPERATIVE_RE = re.compile(
     r"\b(ignore|disregard|forget|override|bypass|reveal|pretend|act|"
     r"roleplay|translate|respond|output|print|show|expose|dump|become|"
     r"list|enumerate|display|extract|read|access|leak|disable|enable|"
     r"comply|follow|execute|run|perform)\b",
     re.IGNORECASE,
 )
+_PUNCT_ABUSE_RE = re.compile(r"[!?]{2,}")
 
 
-# ── Entropy ───────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────
 
 def _shannon_entropy(text: str) -> float:
-    """
-    Shannon entropy of the character distribution.
-    High entropy → unusual character mix → possible obfuscation / encoding.
-    """
     if not text:
         return 0.0
-    freq   = Counter(text)
-    total  = len(text)
+    freq  = Counter(text)
+    total = len(text)
     return -sum((c / total) * math.log2(c / total) for c in freq.values())
+
+
+def _repetition_ratio(text: str) -> float:
+    words = re.findall(r"\b\w+\b", text.lower())
+    if len(words) < 6:
+        return 0.0
+    ngrams  = [tuple(words[i:i+3]) for i in range(len(words) - 2)]
+    counts  = Counter(ngrams)
+    repeated = sum(c - 1 for c in counts.values() if c > 1)
+    return repeated / len(ngrams)
+
+
+def _imperative_score(count: int) -> int:
+    """Scale by count: 2-3=+10, 4-5=+15, 6+=+20"""
+    if count < _T.imperative_min:
+        return 0
+    if count <= 3:
+        return 10
+    if count <= 5:
+        return 15
+    return _W_IMPERATIVES
 
 
 # ── Main layer function ───────────────────────────────────────────────────
 
 def feature_engineering_layer(prompt: str) -> dict:
-    """
-    Evaluates five independent structural signals and accumulates a score.
-
-    Signal                   Threshold    Points
-    ─────────────────────────────────────────────
-    Shannon entropy          > 4.5        +20
-    Special-character ratio  > 0.12       +20
-    Prompt length            > 500 chars  +15
-    Imperative verb count    >= 2         +25   ← was 3
-    Uppercase ratio          > 0.25       +10
-
-    Total is capped at 95.  Triggered when score >= 30.
-    """
     length = len(prompt)
 
     if length == 0:
         return {
-            "score":     0,
-            "triggered": False,
-            "reason":    "Empty prompt — no features extracted.",
+            "score": 0, "triggered": False,
+            "reason": "Empty prompt — no features extracted.",
+            "signals": {},
         }
 
-    # ── Compute features ─────────────────────────────────────────────────
-    entropy = _shannon_entropy(prompt)
+    # ── Compute ───────────────────────────────────────────────────────────
+    entropy       = _shannon_entropy(prompt)
+    special_count = sum(1 for c in prompt if not c.isalnum() and c not in " \n\t.,!?'\"-")
+    special_ratio = special_count / length
+    upper_ratio   = sum(1 for c in prompt if c.isupper()) / length
+    imp_hits      = _IMPERATIVE_RE.findall(prompt)
+    imp_count     = len(imp_hits)
+    unique_verbs  = list(dict.fromkeys(v.lower() for v in imp_hits))
+    punct_count   = len(_PUNCT_ABUSE_RE.findall(prompt))
+    rep_ratio     = _repetition_ratio(prompt)
+    imp_pts       = _imperative_score(imp_count)
 
-    special_chars  = sum(
-        1 for c in prompt
-        if not c.isalnum() and c not in " \n\t.,!?'\"-"
-    )
-    special_ratio  = special_chars / length
+    # ── Build structured signals ──────────────────────────────────────────
+    signals = {
+        "entropy": {
+            "fired":   entropy > _T.entropy_high,
+            "value":   round(entropy, 2),
+            "display": f"{entropy:.2f}",
+            "label":   "Entropy",
+            "weight":  _W_ENTROPY,
+            "points":  _W_ENTROPY if entropy > _T.entropy_high else 0,
+        },
+        "special_chars": {
+            "fired":   special_ratio > _T.special_char_ratio,
+            "value":   round(special_ratio, 3),
+            "display": f"{special_ratio:.0%}",
+            "label":   "Special chars",
+            "weight":  _W_SPECIAL_CHARS,
+            "points":  _W_SPECIAL_CHARS if special_ratio > _T.special_char_ratio else 0,
+        },
+        "length": {
+            "fired":   length > _T.length_long,
+            "value":   length,
+            "display": f"{length} chars",
+            "label":   "Length",
+            "weight":  _W_LENGTH,
+            "points":  _W_LENGTH if length > _T.length_long else 0,
+        },
+        "imperatives": {
+            "fired":   imp_pts > 0,
+            "value":   imp_count,
+            "display": (f"{imp_count} verbs"
+                        + (f" ({', '.join(unique_verbs[:3])}{'…' if len(unique_verbs) > 3 else ''})"
+                           if unique_verbs else "")),
+            "label":   "Imperative verbs",
+            "weight":  _W_IMPERATIVES,
+            "points":  imp_pts,
+        },
+        "uppercase": {
+            "fired":   upper_ratio > _T.uppercase_ratio,
+            "value":   round(upper_ratio, 3),
+            "display": f"{upper_ratio:.0%}",
+            "label":   "Uppercase ratio",
+            "weight":  _W_UPPERCASE,
+            "points":  _W_UPPERCASE if upper_ratio > _T.uppercase_ratio else 0,
+        },
+        "punct_abuse": {
+            "fired":   punct_count >= _T.punct_abuse_count,
+            "value":   punct_count,
+            "display": f"{punct_count} run(s)",
+            "label":   "Punct. abuse",
+            "weight":  _W_PUNCT_ABUSE,
+            "points":  _W_PUNCT_ABUSE if punct_count >= _T.punct_abuse_count else 0,
+        },
+        "repetition": {
+            "fired":   rep_ratio > _T.repetition_ratio,
+            "value":   round(rep_ratio, 3),
+            "display": f"{rep_ratio:.0%}",
+            "label":   "Phrase repetition",
+            "weight":  _W_REPETITION,
+            "points":  _W_REPETITION if rep_ratio > _T.repetition_ratio else 0,
+        },
+    }
 
-    upper_count    = sum(1 for c in prompt if c.isupper())
-    upper_ratio    = upper_count / length
-
-    imperative_hits = _IMPERATIVE_PATTERN.findall(prompt)
-    imperative_count = len(imperative_hits)
-
-    # ── Accumulate score & flags ─────────────────────────────────────────
-    score = 0
-    flags: list[str] = []
-
-    if entropy > _T.entropy_high:
-        score += _SCORE_ENTROPY
-        flags.append(f"entropy {entropy:.2f}")
-
-    if special_ratio > _T.special_char_ratio:
-        score += _SCORE_SPECIAL_CHARS
-        flags.append(f"special-char ratio {special_ratio:.2f}")
-
-    if length > _T.length_long:
-        score += _SCORE_LENGTH
-        flags.append(f"length {length} chars")
-
-    if imperative_count >= _T.imperative_min:
-        score += _SCORE_IMPERATIVES
-        # Deduplicate the matched verbs for the reason string
-        unique_verbs = list(dict.fromkeys(v.lower() for v in imperative_hits))
-        flags.append(f"{imperative_count} imperative verbs ({', '.join(unique_verbs[:4])})")
-
-    if upper_ratio > _T.uppercase_ratio:
-        score += _SCORE_UPPERCASE
-        flags.append(f"uppercase ratio {upper_ratio:.2f}")
-
-    score     = min(score, _MAX_SCORE)
+    score     = min(_MAX_SCORE, sum(s["points"] for s in signals.values()))
     triggered = score >= _TRIGGER_THRESHOLD
 
-    if not flags:
-        reason = (
-            f"No anomalous features detected "
-            f"(entropy: {entropy:.2f}, length: {length})."
-        )
+    fired = [s["label"] for s in signals.values() if s["fired"]]
+    if not fired:
+        reason = f"No structural anomalies (entropy: {entropy:.2f}, {length} chars)."
+    elif len(fired) == 1:
+        reason = f"1 anomaly: {fired[0]}."
     else:
-        reason = f"Anomalous features: {'; '.join(flags)}."
+        reason = f"{len(fired)} anomalies: {', '.join(fired)}."
 
     return {
         "score":     score,
         "triggered": triggered,
         "reason":    reason,
+        "signals":   signals,
     }
