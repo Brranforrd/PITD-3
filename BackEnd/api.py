@@ -1,32 +1,8 @@
-"""
-GuardianLM - Detection Engine API Router (Ollama backend)
-
-Exposes:
-  POST /api/analyze-prompt  — multi-layer injection analysis
-  GET  /api/health          — liveness check + Ollama status
-  GET  /api/models          — list models available in Ollama
-
-Detection pipeline
-------------------
-  Stage 1 — llm_guard pre-scan (PromptInjection, Secrets, InvisibleText, Language)
-             Sanitises the prompt and provides a pre-signal risk boost.
-
-  Stage 2 — Four custom layers (parallel, purely local, no downloads):
-             layers/mlc.py  ML Classifier       (Iron Man   🦾)
-             layers/rb.py   Rule-Based          (Cap. America🛡)
-             layers/sa.py   Similarity Analysis (Black Widow 🕷)
-             layers/fe.py   Feature Engineering (Dr. Strange 🔮)
-
-  Stage 3 — Nick Fury Orchestrator: weighted aggregation → verdict → action.
-
-  Stage 4 — Forward safe/sanitised prompts to Ollama for inference.
-"""
 
 import os
 import re
 import time
 import httpx
-
 from fastapi import FastAPI, APIRouter, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

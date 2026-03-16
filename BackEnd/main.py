@@ -1,16 +1,3 @@
-"""
-GuardianLM - FastAPI Application Entry Point (Ollama backend)
-
-Run from the project root:
-    uvicorn BackEnd.main:app --reload --port 8000
-
-Or from within the BackEnd directory:
-    uvicorn main:app --reload --port 8000
-
-Required env vars (set in BackEnd/.env):
-    OLLAMA_BASE_URL   default: http://localhost:11434
-    OLLAMA_MODEL      default: llama3.2
-"""
 
 import sys
 import os
