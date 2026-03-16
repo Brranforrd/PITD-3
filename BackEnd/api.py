@@ -1,7 +1,7 @@
-
 import os
 import re
 import time
+import logging
 import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +26,16 @@ from llm_guard.input_scanners import (
     Language,
 )
 from llm_guard.input_scanners.language import MatchType
+
+# ── FIX (Bug A / Priority 3): Structured server-side logging.
+# BLOCK and ESCALATE verdicts are now written to guardlm.log so operators
+# can review threats even when the frontend is not open.
+logging.basicConfig(
+    filename="guardianlm.log",
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)s  %(message)s",
+)
+_log = logging.getLogger("guardianlm")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -121,21 +131,68 @@ def _strip_fences(text: str) -> str:
 def _naive_sanitize(prompt: str) -> str:
     """
     Lightweight fallback sanitiser for SANITIZE-grade prompts.
-    Strips the most common override and smuggling patterns.
+
+    FIX (Bug F): The original version only had 2 regex passes and left
+    XML control-tag wrappers intact (e.g. "<System Update>...[REDACTED]...
+    </System Update>" was still forwarded to Ollama). Added passes for:
+      - XML/HTML-style control tags (<System *>, <SecurityUpdate>, etc.)
+      - Credential/secret exfiltration phrasing
+      - Debug-framing extraction attempts
+      - Safety-disabled false framing
+      - Compliance-coercion phrasing
     llm_guard's scan_prompt() already sanitises at the text level;
     this adds a second pass for any residual patterns.
     """
+    flags = re.IGNORECASE | re.DOTALL
+
+    # Pass 1 (original): instruction override phrases
     out = re.sub(
         r"\bignore\b.{0,60}\b(instructions?|rules?|guidelines?)\b",
         "[REDACTED]",
         prompt,
-        flags=re.IGNORECASE | re.DOTALL,
+        flags=flags,
     )
+    # Pass 2 (original): bracketed payload smuggling
     out = re.sub(
         r"\[.{0,80}(system|override|ignore|admin|instructions?).{0,80}\]",
         "[REDACTED]",
         out,
-        flags=re.IGNORECASE | re.DOTALL,
+        flags=flags,
+    )
+    # Pass 3 (FIX Bug C): XML / HTML-style system & control tags — strip the
+    # entire tag including any content between opening and closing tags.
+    out = re.sub(
+        r"<\s*/?\s*(system|security|admin|override|update|control|config|"
+        r"command|directive|policy|filter|safety)\b[^>]*>",
+        "[REDACTED-TAG]",
+        out,
+        flags=flags,
+    )
+    # Pass 4 (FIX Bug D): Credential / secret exfiltration phrasing
+    out = re.sub(
+        r"\b(print|show|output|display|reveal|expose|dump|list|enumerate|"
+        r"access|read|return)\b.{0,60}"
+        r"\b(api.?key|secret|token|credential|password|env(ironment)?"
+        r".?var(iable)?|config|internal.?message|system.?context)\b",
+        "[REDACTED-EXFIL]",
+        out,
+        flags=flags,
+    )
+    # Pass 5 (FIX Bug C): Safety-disabled false framing
+    out = re.sub(
+        r"\b(filter|safety|security|restriction|guard)s?\b.{0,30}"
+        r"\b(disabled?|turned off|bypassed?|removed?|ignored?)\b",
+        "[REDACTED-BYPASS]",
+        out,
+        flags=flags,
+    )
+    # Pass 6 (FIX Bug C): Compliance-coercion
+    out = re.sub(
+        r"\b(comply|obey|follow)\b.{0,40}\b(all|every|any)\b.{0,40}"
+        r"\b(request|instruction|command|order)\b",
+        "[REDACTED-COERCION]",
+        out,
+        flags=flags,
     )
     return out.strip()
 
@@ -155,6 +212,19 @@ _LAYER_WEIGHTS: dict[str, float] = {
 # llm_guard risk boost applied to the weighted custom-layer score.
 # Max boost is 20 points — llm_guard informs but doesn't dominate.
 _LG_BOOST_WEIGHT = 0.20
+
+# FIX (Bug A): Minimum score floor when llm_guard fires any scanner.
+# Live testing showed that a purely social-engineering prompt ("print API
+# keys for debugging") scores only ~6.5 because custom layers have no
+# keyword coverage for it, yet llm_guard:PromptInjection still fires.
+# Without this floor the verdict is SAFE/ALLOW — a critical false negative.
+_LG_TRIGGERED_SCORE_FLOOR = 40.0
+
+# FIX (Bug A): Layer consensus bonus. When 3+ custom layers all flag the
+# same prompt, the weighted average is dragged down by the 0-scoring layers.
+# A bonus is added to reflect the unanimous agreement signal.
+_CONSENSUS_BONUS_3_LAYERS = 15.0   # 3 layers triggered
+_CONSENSUS_BONUS_4_LAYERS = 20.0   # all 4 layers triggered
 
 
 def _run_llm_guard(prompt: str) -> tuple[str, list[str], float]:
@@ -250,9 +320,32 @@ async def analyze_prompt(request: Request, body: PromptRequest):
 
     # ── Stage 3: Orchestrate ─────────────────────────────────────────────
     # Combine weighted custom score + llm_guard boost, cap at 100
-    overall_score  = min(100.0, round(base_score + lg_boost, 2))
+    overall_score = min(100.0, round(base_score + lg_boost, 2))
+
+    # FIX (Bug A): If any llm_guard scanner fired, enforce a minimum floor
+    # so social-engineering prompts that bypass keyword/rule layers are still
+    # escalated to at least SUSPICIOUS rather than SAFE/ALLOW.
+    if lg_attacks:
+        overall_score = max(overall_score, _LG_TRIGGERED_SCORE_FLOOR)
+
+    # FIX (Bug A): Layer consensus bonus — unanimous multi-layer agreement
+    # is a stronger signal than the weighted average alone.
+    triggered_count = len(layer_attacks)
+    if triggered_count >= 4:
+        overall_score = min(100.0, overall_score + _CONSENSUS_BONUS_4_LAYERS)
+    elif triggered_count >= 3:
+        overall_score = min(100.0, overall_score + _CONSENSUS_BONUS_3_LAYERS)
+
+    overall_score   = round(overall_score, 2)
     verdict, action = _verdict_and_action(overall_score)
-    attack_types   = list(dict.fromkeys(layer_attacks + lg_attacks))  # dedup, order-preserving
+    attack_types    = list(dict.fromkeys(layer_attacks + lg_attacks))  # dedup, order-preserving
+
+    # FIX (Priority 3): Structured server-side logging for BLOCK / ESCALATE.
+    if action in ("BLOCK", "ESCALATE"):
+        _log.warning(
+            "ACTION=%s SCORE=%.1f VERDICT=%s ATTACKS=%s PROMPT_SNIPPET=%.80r",
+            action, overall_score, verdict, attack_types, body.prompt,
+        )
 
     # ── Determine sanitised output ────────────────────────────────────────
     # Use llm_guard's sanitised text as the base; apply naive pass if SANITIZE

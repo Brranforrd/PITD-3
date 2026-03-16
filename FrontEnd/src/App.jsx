@@ -40,10 +40,10 @@ const ATTACK_EXAMPLES = [
 ];
 
 const LAYER_COLORS = {
-  ml_classifier:       { color: "#00ff88", bg: "rgba(0,255,136,0.1)" },
-  rule_based:          { color: "#ff6b35", bg: "rgba(255,107,53,0.1)" },
-  similarity_analysis: { color: "#a78bfa", bg: "rgba(167,139,250,0.1)" },
-  feature_engineering: { color: "#fbbf24", bg: "rgba(251,191,36,0.1)" },
+  ml_classifier:       { color: "#00ff88", bg: "rgba(0,255,136,0.1)", glowHex: "33" },
+  rule_based:          { color: "#ff6b35", bg: "rgba(255,107,53,0.1)", glowHex: "33" },
+  similarity_analysis: { color: "#a78bfa", bg: "rgba(167,139,250,0.1)", glowHex: "44" },
+  feature_engineering: { color: "#fbbf24", bg: "rgba(251,191,36,0.1)", glowHex: "66" },
 };
 
 const LAYER_DISPLAY_NAMES = {
@@ -73,6 +73,9 @@ const ACTION_ICONS = {
   SANITIZE: "⚙",
   ESCALATE: "⚠",
 };
+
+// FIX (Bug B): History key for localStorage persistence
+const HISTORY_STORAGE_KEY = "guardianlm_scan_history";
 
 // ════════════════════════════════════════════════════════════════════════════
 // UTILITY COMPONENTS
@@ -142,7 +145,7 @@ function LayerCard({ layerKey, data, isAnalyzing }) {
     <div className="layer-card" style={{
       background: triggered ? bg : undefined,
       borderColor: triggered ? color : undefined,
-      boxShadow: triggered ? `0 0 16px ${color}22` : undefined,
+      boxShadow: triggered ? `0 0 20px ${color}${LAYER_COLORS[layerKey]?.glowHex ?? "33"}` : undefined,
     }}>
       <div className="layer-header">
         <div className="layer-name-wrap">
@@ -177,7 +180,18 @@ export default function App() {
   const [prompt, setPrompt]           = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult]           = useState(null);
-  const [history, setHistory]         = useState([]);
+
+  // FIX (Bug B): Load history from localStorage on mount so scans persist
+  // across page reloads. Store up to 20 most recent entries.
+  const [history, setHistory] = useState(() => {
+    try {
+      const stored = localStorage.getItem(HISTORY_STORAGE_KEY);
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const [activeTab, setActiveTab]     = useState("analyze");
 
   // Ollama health state
@@ -188,6 +202,17 @@ export default function App() {
   });
 
   const textareaRef = useRef(null);
+
+  // ── Persist history to localStorage on every change ──────────────────
+  // FIX (Bug B): This effect keeps localStorage in sync whenever history
+  // updates, so the scan log survives page refreshes.
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+    } catch {
+      // Silently ignore quota errors
+    }
+  }, [history]);
 
   // ── Fetch Ollama health on mount ─────────────────────────────────────────
   useEffect(() => {
@@ -229,14 +254,17 @@ export default function App() {
 
       const data = await response.json();
       setResult(data);
-      setHistory((prev) => [
-        {
-          prompt: prompt.slice(0, 60) + (prompt.length > 60 ? "..." : ""),
-          ...data,
-          timestamp: new Date().toLocaleTimeString(),
-        },
-        ...prev.slice(0, 9),
-      ]);
+      setHistory((prev) => {
+        const updated = [
+          {
+            prompt: prompt.slice(0, 60) + (prompt.length > 60 ? "..." : ""),
+            ...data,
+            timestamp: new Date().toLocaleTimeString(),
+          },
+          ...prev.slice(0, 19),  // keep 20 most recent
+        ];
+        return updated;
+      });
     } catch (err) {
       setResult({ error: true, message: String(err) });
     } finally {
@@ -249,19 +277,30 @@ export default function App() {
     setActiveTab("analyze");
   };
 
+  // FIX (Bug B): Clear history handler — lets users reset the stored log
+  const clearHistory = () => {
+    setHistory([]);
+    try { localStorage.removeItem(HISTORY_STORAGE_KEY); } catch { /* noop */ }
+  };
+
   const layerKeys = ["ml_classifier", "rule_based", "similarity_analysis", "feature_engineering"];
 
   // ── Status dot color for header ──────────────────────────────────────────
-  // null = checking, true = online, false = offline
   const statusColor =
-    ollamaStatus.reachable === null ? "#fbbf24"   // yellow — checking
-    : ollamaStatus.reachable        ? "#00ff88"   // green — online
-    :                                 "#ff2244";  // red — offline
+    ollamaStatus.reachable === null ? "#fbbf24"
+    : ollamaStatus.reachable        ? "#00ff88"
+    :                                 "#ff2244";
 
   const statusLabel =
     ollamaStatus.reachable === null ? "CHECKING..."
     : ollamaStatus.reachable        ? "OLLAMA ONLINE"
     :                                 "OLLAMA OFFLINE";
+
+  // FIX (Bug B): Threats Found now uses verdict !== 'SAFE' instead of the
+  // hardcoded score > 60 threshold, which caused the counter to always
+  // show 0 for SUSPICIOUS verdicts (scores 30–59).
+  const totalScans   = history.length;
+  const threatsFound = history.filter((h) => h.verdict && h.verdict !== "SAFE").length;
 
   // ════════════════════════════════════════════════════════════════════════
   // RENDER
@@ -280,7 +319,7 @@ export default function App() {
             <div className="header-logo">🛡️</div>
             <div>
               <h1 className="header-title">GUARDIAN<span>LM</span></h1>
-              <p className="header-subtitle">LLM PROMPT INJECTION DETECTION SYSTEM v1.0 · OLLAMA</p>
+              <p className="header-subtitle">LLM PROMPT INJECTION DETECTION SYSTEM v1.1 · OLLAMA</p>
             </div>
             <div className="header-status">
               <div className="status-dot" style={{ background: statusColor, boxShadow: `0 0 0 0 ${statusColor}` }} />
@@ -396,7 +435,13 @@ export default function App() {
                     }}>
                       {result.verdict}
                     </p>
-                    {result.attack_types_detected?.length > 0 && (
+                    {/* FIX (Bug G): Only show attack tags when the verdict is NOT
+                        SAFE. Showing red "llm_guard:PromptInjection" tags on a
+                        SAFE verdict was contradictory and confusing for users.
+                        The lg_boost floor fix in api.py now prevents this state
+                        from occurring for genuine threats, but the UI guard
+                        remains as a defensive fallback. */}
+                    {result.verdict !== "SAFE" && result.attack_types_detected?.length > 0 && (
                       <div className="attack-tags">
                         {result.attack_types_detected.map((type) => (
                           <span key={type} className="attack-tag">{type}</span>
@@ -436,19 +481,26 @@ export default function App() {
                 <div className="error-card">{result.message}</div>
               )}
 
-              {/* System Stats — model name now comes from live health check */}
+              {/* System Stats */}
+              {/* FIX (Bug B): threatsFound now counts verdict !== 'SAFE'
+                  (was: overall_risk_score > 60, which always showed 0 for
+                  SUSPICIOUS-range scores during the test session). */}
               <div className="stats-card">
                 <p className="stats-label">// SYSTEM STATS</p>
                 {[
-                  { label: "Total Scans",   value: history.length + (result ? 1 : 0) },
-                  { label: "Threats Found", value: history.filter((h) => h.overall_risk_score > 60).length + (result?.overall_risk_score > 60 ? 1 : 0) },
+                  { label: "Total Scans",   value: totalScans },
+                  { label: "Threats Found", value: threatsFound },
                   { label: "Engine",        value: "Ollama (local)" },
                   { label: "Model",         value: ollamaStatus.model },
                   { label: "Latency",       value: result?.latency_ms ? `${result.latency_ms}ms` : "—" },
                 ].map(({ label, value }) => (
                   <div key={label} className="stat-row">
                     <span className="stat-key">{label}</span>
-                    <span className="stat-val">{value}</span>
+                    <span className="stat-val" style={
+                      label === "Threats Found" && value > 0
+                        ? { color: "#ff6b35", fontWeight: "bold" }
+                        : undefined
+                    }>{value}</span>
                   </div>
                 ))}
               </div>
@@ -485,7 +537,28 @@ export default function App() {
         {/* ════════════════════════════════════════════════════════════════ */}
         {activeTab === "history" && (
           <div className="history-tab">
-            <p className="history-intro">// SCAN LOG — {history.length} entries</p>
+            {/* FIX (Bug B): Added "CLEAR" button and shows persistent count */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
+              <p className="history-intro" style={{ margin: 0 }}>// SCAN LOG — {history.length} entries (persists across reloads)</p>
+              {history.length > 0 && (
+                <button
+                  onClick={clearHistory}
+                  style={{
+                    padding: "6px 16px",
+                    background: "transparent",
+                    border: "1px solid #ff2244",
+                    borderRadius: "4px",
+                    color: "#ff2244",
+                    fontFamily: "var(--font)",
+                    fontSize: "11px",
+                    letterSpacing: "2px",
+                    cursor: "pointer",
+                  }}
+                >
+                  CLEAR LOG
+                </button>
+              )}
+            </div>
             {history.length === 0 ? (
               <div className="history-empty">
                 <p className="history-empty-icon">📋</p>
@@ -516,7 +589,7 @@ export default function App() {
         {/* ── Footer ── */}
         <footer className="footer">
           <span>GUARDIANLM // PROMPT INJECTION DEFENSE SYSTEM</span>
-          <span>OLLAMA LOCAL INFERENCE ENGINE v1.0</span>
+          <span>OLLAMA LOCAL INFERENCE ENGINE v1.1</span>
         </footer>
       </div>
     </div>
