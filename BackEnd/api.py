@@ -1,5 +1,6 @@
 import os
 import re
+import unicodedata
 import time
 import logging
 import httpx
@@ -10,6 +11,7 @@ from pydantic import BaseModel, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+
 
 # ── Custom detection layers ───────────────────────────────────────────────
 from Layers.mlc import ml_classifier_layer
@@ -118,14 +120,8 @@ class AnalysisResponse(BaseModel):
 # HELPERS
 # ════════════════════════════════════════════════════════════════════════════
 
-def _strip_fences(text: str) -> str:
-    """Remove accidental markdown code fences some models emit."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-    if text.endswith("```"):
-        text = text.rsplit("```", 1)[0]
-    return text.strip()
+def _normalize(prompt: str) -> str:
+    return unicodedata.normalize("NFKC", prompt)
 
 
 def _naive_sanitize(prompt: str) -> str:
@@ -144,6 +140,7 @@ def _naive_sanitize(prompt: str) -> str:
     this adds a second pass for any residual patterns.
     """
     flags = re.IGNORECASE | re.DOTALL
+    out = _normalize(prompt)
 
     # Pass 1 (original): instruction override phrases
     out = re.sub(
@@ -316,7 +313,7 @@ async def analyze_prompt(request: Request, body: PromptRequest):
     lg_sanitized, lg_attacks, lg_boost = _run_llm_guard(body.prompt)
 
     # ── Stage 2: Custom layers (run on original prompt for accurate scoring)
-    layers, base_score, layer_attacks = _run_custom_layers(body.prompt)
+    layers, base_score, layer_attacks = _run_custom_layers(_normalize(body.prompt))
 
     # ── Stage 3: Orchestrate ─────────────────────────────────────────────
     # Combine weighted custom score + llm_guard boost, cap at 100
