@@ -89,7 +89,7 @@ const ACTION_ICONS = {
 const HISTORY_STORAGE_KEY = "guardianlm_scan_history";
 
 // Signal display order for the FE card
-const FE_SIGNAL_ORDER = [
+/*const FE_SIGNAL_ORDER = [
   "imperatives",
   "uppercase",
   "punct_abuse",
@@ -97,7 +97,7 @@ const FE_SIGNAL_ORDER = [
   "special_chars",
   "repetition",
   "length",
-];
+];*/
 
 // ════════════════════════════════════════════════════════════════════════════
 // UTILITY COMPONENTS

@@ -103,6 +103,7 @@ class LayerResult(BaseModel):
     score:     int
     triggered: bool
     reason:    str
+    signals:   dict | None = None
 
 
 class AnalysisResponse(BaseModel):

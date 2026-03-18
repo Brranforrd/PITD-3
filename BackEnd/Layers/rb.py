@@ -108,6 +108,21 @@ _RULES: list[_Rule] = [
         "Markdown header injection",
         2,
     ),
+    _Rule(
+        r"\b(authorized|approved|permitted)\b.{0,40}\b(protocol|directive|internal|security)\b", 
+        "Authority-claim bypass", 
+        3,
+    ),
+    _Rule(
+        r"\b(fetch|execute|load|download|run)\b.{0,60}https?://", 
+        "SSRF/remote payload injection", 
+        3
+    ),
+    _Rule(
+        r"\b(instructions?|rules?|config)\b.{0,40}\b(take priority|override|supersede)\b", 
+        "Priority override framing", 
+        3
+    ),
     # FIX (Bug C): Catch generic freeform XML-style control tags that wrap
     # override instructions — e.g. <SecurityUpdate>, <AdminOverride>, etc.
     _Rule(
