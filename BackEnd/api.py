@@ -143,22 +143,21 @@ def _naive_sanitize(prompt: str) -> str:
     flags = re.IGNORECASE | re.DOTALL
     out = _normalize(prompt)
 
-    # Pass 1 (original): instruction override phrases
+    # Pass 1: instruction override phrases
     out = re.sub(
         r"\bignore\b.{0,60}\b(instructions?|rules?|guidelines?)\b",
         "[REDACTED]",
         prompt,
         flags=flags,
     )
-    # Pass 2 (original): bracketed payload smuggling
+    # Pass 2: Bracketed payload smuggling
     out = re.sub(
         r"\[.{0,80}(system|override|ignore|admin|instructions?).{0,80}\]",
         "[REDACTED]",
         out,
         flags=flags,
     )
-    # Pass 3 (FIX Bug C): XML / HTML-style system & control tags — strip the
-    # entire tag including any content between opening and closing tags.
+    # Pass 3: XML / HTML-style system & control tags
     out = re.sub(
         r"<\s*/?\s*(system|security|admin|override|update|control|config|"
         r"command|directive|policy|filter|safety)\b[^>]*>",
@@ -166,7 +165,7 @@ def _naive_sanitize(prompt: str) -> str:
         out,
         flags=flags,
     )
-    # Pass 4 (FIX Bug D): Credential / secret exfiltration phrasing
+    # Pass 4: Credential / secret exfiltration phrasing
     out = re.sub(
         r"\b(print|show|output|display|reveal|expose|dump|list|enumerate|"
         r"access|read|return)\b.{0,60}"
@@ -176,7 +175,7 @@ def _naive_sanitize(prompt: str) -> str:
         out,
         flags=flags,
     )
-    # Pass 5 (FIX Bug C): Safety-disabled false framing
+    # Pass 5: Safety-disabled false framing
     out = re.sub(
         r"\b(filter|safety|security|restriction|guard)s?\b.{0,30}"
         r"\b(disabled?|turned off|bypassed?|removed?|ignored?)\b",

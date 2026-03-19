@@ -44,7 +44,7 @@ _W_PUNCT_ABUSE    = 15   # new
 _W_REPETITION     = 10   # new
 
 _MAX_SCORE         = 95
-_TRIGGER_THRESHOLD = 30
+_TRIGGER_THRESHOLD = 10
 
 # ── Patterns ──────────────────────────────────────────────────────────────
 _IMPERATIVE_RE = re.compile(
