@@ -27,7 +27,7 @@ from slowapi.errors import RateLimitExceeded
 
 app = FastAPI(
     title="GuardianLM API",
-    description="LLM Prompt Injection Detection System — powered by Ollama",
+    description="GuardianLM Prompt Injection System",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -68,7 +68,7 @@ app.include_router(router, prefix="/api")
 def root():
     return {
         "status": "online",
-        "system": "GuardianLM v1.0",
-        "backend": "Ollama (local)",
+        "system": "GuardianLM Prompt Injection Tester",
+        "backend": "Integrated Successfully",
         "docs": "/docs",
     }

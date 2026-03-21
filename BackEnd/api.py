@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
+
 
 
 # ── Custom detection layers ───────────────────────────────────────────────
@@ -29,7 +29,6 @@ from llm_guard.input_scanners import (
 )
 from llm_guard.input_scanners.language import MatchType
 
-# ── FIX (Bug A / Priority 3): Structured server-side logging.
 # BLOCK and ESCALATE verdicts are now written to guardlm.log so operators
 # can review threats even when the frontend is not open.
 logging.basicConfig(
