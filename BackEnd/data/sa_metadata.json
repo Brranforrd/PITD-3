@@ -1,0 +1,12 @@
+{
+  "dataset": "neuralchemy/Prompt-injection-dataset",
+  "total_vectors": 8778,
+  "categories": {
+    "direct_override": 4815,
+    "other": 2915,
+    "jailbreak_persona": 991,
+    "system_extraction": 47,
+    "token_injection": 10
+  },
+  "model": "sentence-transformers/all-MiniLM-L6-v2"
+}
