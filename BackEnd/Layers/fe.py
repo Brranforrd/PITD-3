@@ -142,8 +142,7 @@ def feature_engineering_layer(prompt: str) -> dict:
             "fired":   imp_pts > 0,
             "value":   imp_count,
             "display": (f"{imp_count} verbs"
-                        + (f" ({', '.join(unique_verbs[:3])}{'…' if len(unique_verbs) > 3 else ''})"
-                           if unique_verbs else "")),
+                           if unique_verbs else ""),
             "label":   "Imperative verbs",
             "weight":  _W_IMPERATIVES,
             "points":  imp_pts,
@@ -174,7 +173,7 @@ def feature_engineering_layer(prompt: str) -> dict:
         },
     }
 
-    score     = min(_MAX_SCORE, sum(s["points"] for s in signals.values()))
+    score = min(_MAX_SCORE, sum(s["points"] for s in signals.values()))
     triggered = score >= _TRIGGER_THRESHOLD
 
     fired = [s["label"] for s in signals.values() if s["fired"]]
