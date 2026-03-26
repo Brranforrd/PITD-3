@@ -332,9 +332,9 @@ async def analyze_prompt(request: Request, body: PromptRequest):
     elif triggered_count >= 3:
         overall_score = min(100.0, overall_score + _CONSENSUS_BONUS_3_LAYERS)
 
-    overall_score   = round(overall_score, 2)
+    overall_score = round(overall_score, 2)
     verdict, action = _verdict_and_action(overall_score)
-    attack_types    = list(dict.fromkeys(layer_attacks + lg_attacks))  # dedup, order-preserving
+    attack_types = list(dict.fromkeys(layer_attacks + lg_attacks))  # dedup, order-preserving
 
     # FIX (Priority 3): Structured server-side logging for BLOCK / ESCALATE.
     if action in ("BLOCK", "ESCALATE"):

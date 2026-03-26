@@ -159,13 +159,14 @@ function SignalLayerCard({ layerKey, data, isAnalyzing, signalOrder }) {
 // ════════════════════════════════════════════════════════════════════════════
 
 export default function App() {
-  const [prompt, setPrompt]           = useState("");
+  const [prompt, setPrompt] = useState("");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [result, setResult]           = useState(null);
+  const [result, setResult] = useState(null);
   const [history, setHistory] = useState(() => {
     try { return JSON.parse(localStorage.getItem(HISTORY_STORAGE_KEY)) || []; } catch { return []; }
   });
-  const [activeTab, setActiveTab]       = useState("analyze");
+  
+  const [activeTab, setActiveTab] = useState("analyze");
   const [ollamaStatus, setOllamaStatus] = useState({ reachable: null, model: "llama3.2", modelAvailable: null });
   const textareaRef = useRef(null);
 
