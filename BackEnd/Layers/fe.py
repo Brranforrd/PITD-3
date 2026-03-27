@@ -24,7 +24,7 @@ from dataclasses import dataclass
 class _Thresholds:
     entropy_high:        float = 4.5
     special_char_ratio:  float = 0.12
-    length_long:         int   = 500
+    length_long:         int   = 150
     imperative_min:      int   = 2
     uppercase_ratio:     float = 0.25
     punct_abuse_count:   int   = 3      # repeated ! or ? runs — new
